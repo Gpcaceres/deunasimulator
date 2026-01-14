@@ -1,186 +1,560 @@
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
 const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const orders = new Map();
-const payments = new Map();
+const MONGODB_URI = 'mongodb+srv://avillacres:1234AZ@cluster0.ppg8sv5.mongodb.net/';
+
+mongoose.connect(MONGODB_URI)
+
+
+    .then(() => console.log('Conectado a MongoDB'))
+    .catch(err => console.error('Error conectando a MongoDB:', err));
+
+const userSchema = new mongoose.Schema({
+    userId: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    balance: { type: Number, default: 0, min: 0 },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+const merchantSchema = new mongoose.Schema({
+    merchantId: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    email: { type: String, required: true },
+    balance: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+const orderSchema = new mongoose.Schema({
+    orderId: { type: String, required: true, unique: true },
+    paymentCode: { type: String, required: true, unique: true, index: true },
+    merchantId: { type: String, required: true },
+    merchantName: { type: String, required: true },
+    amount: { type: Number, required: true, min: 0.01 },
+    description: { type: String, default: 'Pago' },
+    status: {
+        type: String,
+        enum: ['pending', 'completed', 'expired', 'cancelled'],
+        default: 'pending'
+    },
+    paymentId: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true }
+});
+
+const paymentSchema = new mongoose.Schema({
+    paymentId: { type: String, required: true, unique: true },
+    orderId: { type: String, required: true },
+    userId: { type: String, required: true },
+    userName: { type: String, required: true },
+    merchantId: { type: String, required: true },
+    amount: { type: Number, required: true },
+    paymentMethod: { type: String, required: true },
+    status: {
+        type: String,
+        enum: ['completed', 'failed', 'refunded'],
+        default: 'completed'
+    },
+    processedAt: { type: Date, default: Date.now }
+});
+
+const transactionSchema = new mongoose.Schema({
+    transactionId: { type: String, required: true, unique: true },
+    userId: { type: String, required: true },
+    type: {
+        type: String,
+        enum: ['recharge', 'payment', 'refund'],
+        required: true
+    },
+    amount: { type: Number, required: true },
+    balanceBefore: { type: Number, required: true },
+    balanceAfter: { type: Number, required: true },
+    description: { type: String },
+    relatedId: { type: String },
+    createdAt: { type: Date, default: Date.now }
+});
+
+const bankSchema = new mongoose.Schema({
+    bankId: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    balance: { type: Number, required: true, min: 0 },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+
+const Bank = mongoose.model('Bank', bankSchema);
+const User = mongoose.model('User', userSchema);
+const Merchant = mongoose.model('Merchant', merchantSchema);
+const Order = mongoose.model('Order', orderSchema);
+const Payment = mongoose.model('Payment', paymentSchema);
+const Transaction = mongoose.model('Transaction', transactionSchema);
 
 function generatePaymentCode() {
-  return Math.floor(10000000 + Math.random() * 90000000).toString();
+    return Math.floor(10000000 + Math.random() * 90000000).toString();
 }
 
 function generateId() {
-  return crypto.randomBytes(16).toString('hex');
+    return crypto.randomBytes(16).toString('hex');
 }
 
-app.post('/api/orders/create', (req, res) => {
-  const { merchantId, amount, description, merchantName } = req.body;
 
-  if (!merchantId || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Datos inválidos' });
-  }
+app.post('/api/users/create', async (req, res) => {
+    try {
+        const { name, email } = req.body;
 
-  const orderId = generateId();
-  const paymentCode = generatePaymentCode();
-  
-  const order = {
-    orderId,
-    paymentCode,
-    merchantId,
-    merchantName: merchantName || 'Comercio',
-    amount,
-    description: description || 'Pago',
-    status: 'pending', 
-    createdAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), 
-    paymentId: null
-  };
+        if (!name || !email) {
+            return res.status(400).json({ error: 'Nombre y email son requeridos' });
+        }
 
-  orders.set(orderId, order);
+        const userId = generateId();
+        const user = new User({
+            userId,
+            name,
+            email,
+            balance: 0
+        });
 
-  res.json({
-    success: true,
-    orderId,
-    paymentCode,
-    amount,
-    expiresAt: order.expiresAt
-  });
-});
-
-app.get('/api/orders/:orderId/status', (req, res) => {
-  const { orderId } = req.params;
-  const order = orders.get(orderId);
-
-  if (!order) {
-    return res.status(404).json({ error: 'Orden no encontrada' });
-  }
-
-  if (order.status === 'pending' && new Date() > new Date(order.expiresAt)) {
-    order.status = 'expired';
-  }
-
-  res.json({
-    orderId: order.orderId,
-    status: order.status,
-    amount: order.amount,
-    paymentId: order.paymentId,
-    createdAt: order.createdAt,
-    expiresAt: order.expiresAt
-  });
-});
-
-app.get('/api/payments/query/:paymentCode', (req, res) => {
-  const { paymentCode } = req.params;
-  
-  let foundOrder = null;
-  for (const order of orders.values()) {
-    if (order.paymentCode === paymentCode) {
-      foundOrder = order;
-      break;
+        await user.save();
+        res.json({
+            success: true,
+            userId,
+            name,
+            email,
+            balance: 0
+        });
+    } catch (error) {
+        if (error.code === 11000) {
+            return res.status(400).json({ error: 'El email ya está registrado' });
+        }
+        res.status(500).json({ error: 'Error al crear usuario' });
     }
-  }
-
-  if (!foundOrder) {
-    return res.status(404).json({ error: 'Código de pago no encontrado' });
-  }
-
-  if (foundOrder.status === 'pending' && new Date() > new Date(foundOrder.expiresAt)) {
-    foundOrder.status = 'expired';
-  }
-
-  if (foundOrder.status !== 'pending') {
-    return res.status(400).json({ 
-      error: `La orden está ${foundOrder.status === 'expired' ? 'expirada' : 'ya procesada'}` 
-    });
-  }
-
-  res.json({
-    orderId: foundOrder.orderId,
-    merchantName: foundOrder.merchantName,
-    amount: foundOrder.amount,
-    description: foundOrder.description,
-    expiresAt: foundOrder.expiresAt
-  });
 });
 
-app.post('/api/payments/process', (req, res) => {
-  const { paymentCode, userId, userName, paymentMethod } = req.body;
+app.get('/api/users/:userId', async (req, res) => {
+    try {
+        const user = await User.findOne({ userId: req.params.userId });
 
-  if (!paymentCode || !userId || !paymentMethod) {
-    return res.status(400).json({ error: 'Datos incompletos' });
-  }
+        if (!user) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
 
-  let foundOrder = null;
-  for (const order of orders.values()) {
-    if (order.paymentCode === paymentCode) {
-      foundOrder = order;
-      break;
+        res.json({
+            userId: user.userId,
+            name: user.name,
+            email: user.email,
+            balance: user.balance,
+            createdAt: user.createdAt
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error al obtener usuario' });
     }
-  }
-
-  if (!foundOrder) {
-    return res.status(404).json({ error: 'Código de pago no encontrado' });
-  }
-
-  if (foundOrder.status !== 'pending') {
-    return res.status(400).json({ error: 'La orden ya fue procesada o expiró' });
-  }
-
-  if (new Date() > new Date(foundOrder.expiresAt)) {
-    foundOrder.status = 'expired';
-    return res.status(400).json({ error: 'El código de pago ha expirado' });
-  }
-
-  const paymentId = generateId();
-  const payment = {
-    paymentId,
-    orderId: foundOrder.orderId,
-    userId,
-    userName: userName || 'Usuario',
-    amount: foundOrder.amount,
-    paymentMethod,
-    status: 'completed',
-    processedAt: new Date().toISOString()
-  };
-
-  payments.set(paymentId, payment);
-
-  foundOrder.status = 'completed';
-  foundOrder.paymentId = paymentId;
-
-  res.json({
-    success: true,
-    paymentId,
-    orderId: foundOrder.orderId,
-    amount: foundOrder.amount,
-    status: 'completed',
-    processedAt: payment.processedAt
-  });
 });
 
-app.get('/api/payments/:paymentId', (req, res) => {
-  const { paymentId } = req.params;
-  const payment = payments.get(paymentId);
+app.post('/api/users/login', async (req, res) => {
+    try {
+        const { email } = req.body;
 
-  if (!payment) {
-    return res.status(404).json({ error: 'Pago no encontrado' });
-  }
+        if (!email) {
+            return res.status(400).json({ error: 'Email es requerido' });
+        }
 
-  res.json(payment);
+        const user = await User.findOne({ email });
+
+        if (!user) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+
+        res.json({
+            success: true,
+            userId: user.userId,
+            name: user.name,
+            email: user.email,
+            balance: user.balance
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error al buscar usuario' });
+    }
 });
-app.post('/api/webhooks/payment-status', (req, res) => {
-  console.log('Webhook recibido:', req.body);
-  res.json({ received: true });
+
+app.post('/api/users/:userId/recharge', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { amount } = req.body;
+
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Monto inválido' });
+        }
+
+        const user = await User.findOne({ userId });
+        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+        const bank = await Bank.findOne();
+        if (!bank) return res.status(500).json({ error: 'Banco no inicializado' });
+
+        if (bank.balance < amount) {
+            return res.status(400).json({
+                error: 'Fondos insuficientes en el banco',
+                bankBalance: bank.balance
+            });
+        }
+
+        const userBalanceBefore = user.balance;
+        const bankBalanceBefore = bank.balance;
+
+        // Actualizar saldos
+        user.balance += amount;
+        bank.balance -= amount;
+
+        await user.save();
+        await bank.save();
+
+        const transaction = new Transaction({
+            transactionId: generateId(),
+            userId,
+            type: 'recharge',
+            amount,
+            balanceBefore: userBalanceBefore,
+            balanceAfter: user.balance,
+            description: 'Recarga desde banco'
+        });
+
+        await transaction.save();
+
+        res.json({
+            success: true,
+            amountAdded: amount,
+            newUserBalance: user.balance,
+            bankBalance: bank.balance,
+            transactionId: transaction.transactionId
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Error al procesar recarga' });
+    }
+});
+
+app.post('/api/merchants/create', async (req, res) => {
+    try {
+        const { name, email } = req.body;
+
+        if (!name || !email) {
+            return res.status(400).json({ error: 'Nombre y email son requeridos' });
+        }
+
+        const merchantId = generateId();
+        const merchant = new Merchant({
+            merchantId,
+            name,
+            email,
+            balance: 0
+        });
+
+        await merchant.save();
+        res.json({
+            success: true,
+            merchantId,
+            name,
+            email
+        });
+    } catch (error) {
+        if (error.code === 11000) {
+            return res.status(400).json({ error: 'El email ya está registrado' });
+        }
+        res.status(500).json({ error: 'Error al crear comercio' });
+    }
+});
+
+
+app.post('/api/merchants/login', async (req, res) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({ error: 'Email es requerido' });
+        }
+
+        const merchant = await Merchant.findOne({ email });
+
+        if (!merchant) {
+            return res.status(404).json({ error: 'Comercio no encontrado' });
+        }
+
+        res.json({
+            success: true,
+            merchantId: merchant.merchantId,
+            name: merchant.name,
+            email: merchant.email,
+            balance: merchant.balance
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error al buscar comercio' });
+    }
+});
+
+app.post('/api/orders/create', async (req, res) => {
+    try {
+        const { merchantId, amount, description, merchantName } = req.body;
+
+        if (!merchantId || !amount || amount <= 0) {
+            return res.status(400).json({ error: 'Datos inválidos' });
+        }
+
+        const merchant = await Merchant.findOne({ merchantId });
+        if (!merchant) {
+            return res.status(404).json({ error: 'Comercio no encontrado' });
+        }
+
+        const orderId = generateId();
+        const paymentCode = generatePaymentCode();
+
+        const order = new Order({
+            orderId,
+            paymentCode,
+            merchantId,
+            merchantName: merchantName || merchant.name,
+            amount: parseFloat(amount),
+            description: description || 'Pago',
+            status: 'pending',
+            expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+        });
+
+        await order.save();
+
+        res.json({
+            success: true,
+            orderId,
+            paymentCode,
+            amount: order.amount,
+            expiresAt: order.expiresAt
+        });
+    } catch (error) {
+        console.error('Error creando orden:', error);
+        res.status(500).json({ error: 'Error al crear orden' });
+    }
+});
+
+app.get('/api/orders/:orderId/status', async (req, res) => {
+    try {
+        const order = await Order.findOne({ orderId: req.params.orderId });
+
+        if (!order) {
+            return res.status(404).json({ error: 'Orden no encontrada' });
+        }
+
+
+        if (order.status === 'pending' && new Date() > order.expiresAt) {
+            order.status = 'expired';
+            await order.save();
+        }
+
+        res.json({
+            orderId: order.orderId,
+            status: order.status,
+            amount: order.amount,
+            paymentId: order.paymentId,
+            createdAt: order.createdAt,
+            expiresAt: order.expiresAt
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error al consultar orden' });
+    }
+});
+
+app.get('/api/payments/query/:paymentCode', async (req, res) => {
+    try {
+        const order = await Order.findOne({ paymentCode: req.params.paymentCode });
+
+        if (!order) {
+            return res.status(404).json({ error: 'Código de pago no encontrado' });
+        }
+        if (order.status === 'pending' && new Date() > order.expiresAt) {
+            order.status = 'expired';
+            await order.save();
+        }
+
+        if (order.status !== 'pending') {
+            return res.status(400).json({
+                error: `La orden está ${order.status === 'expired' ? 'expirada' : 'ya procesada'}`
+            });
+        }
+
+        res.json({
+            orderId: order.orderId,
+            merchantName: order.merchantName,
+            amount: order.amount,
+            description: order.description,
+            expiresAt: order.expiresAt
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error al consultar pago' });
+    }
+});
+
+
+app.post('/api/payments/process', async (req, res) => {
+    try {
+        const { paymentCode, userId, userName, paymentMethod } = req.body;
+
+        if (!paymentCode || !userId || !paymentMethod) {
+            return res.status(400).json({ error: 'Datos incompletos' });
+        }
+
+        const order = await Order.findOne({ paymentCode });
+        if (!order) {
+            return res.status(404).json({ error: 'Código de pago no encontrado' });
+        }
+
+        if (order.status !== 'pending') {
+            return res.status(400).json({ error: 'La orden ya fue procesada o expiró' });
+        }
+
+        if (new Date() > order.expiresAt) {
+            order.status = 'expired';
+            await order.save();
+            return res.status(400).json({ error: 'El código de pago ha expirado' });
+        }
+
+        const user = await User.findOne({ userId });
+        if (!user) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+
+        if (user.balance < order.amount) {
+            return res.status(400).json({
+                error: 'Saldo insuficiente',
+                currentBalance: user.balance,
+                required: order.amount,
+                missing: order.amount - user.balance
+            });
+        }
+        const paymentId = generateId();
+
+        const userBalanceBefore = user.balance;
+        user.balance -= order.amount;
+        user.updatedAt = new Date();
+        await user.save();
+
+        const merchant = await Merchant.findOne({ merchantId: order.merchantId });
+        if (merchant) {
+            merchant.balance += order.amount;
+            merchant.updatedAt = new Date();
+            await merchant.save();
+        }
+
+        const payment = new Payment({
+            paymentId,
+            orderId: order.orderId,
+            userId,
+            userName: userName || user.name,
+            merchantId: order.merchantId,
+            amount: order.amount,
+            paymentMethod,
+            status: 'completed'
+        });
+        await payment.save();
+
+
+        const transaction = new Transaction({
+            transactionId: generateId(),
+            userId,
+            type: 'payment',
+            amount: -order.amount,
+            balanceBefore: userBalanceBefore,
+            balanceAfter: user.balance,
+            description: `Pago a ${order.merchantName}`,
+            relatedId: paymentId
+        });
+        await transaction.save();
+
+
+        order.status = 'completed';
+        order.paymentId = paymentId;
+        await order.save();
+
+        res.json({
+            success: true,
+            paymentId,
+            orderId: order.orderId,
+            amount: order.amount,
+            newBalance: user.balance,
+            status: 'completed',
+            processedAt: payment.processedAt
+        });
+    } catch (error) {
+        console.error('Error procesando pago:', error);
+        res.status(500).json({ error: 'Error al procesar pago' });
+    }
+});
+
+app.get('/api/payments/:paymentId', async (req, res) => {
+    try {
+        const payment = await Payment.findOne({ paymentId: req.params.paymentId });
+
+        if (!payment) {
+            return res.status(404).json({ error: 'Pago no encontrado' });
+        }
+
+        res.json(payment);
+    } catch (error) {
+        res.status(500).json({ error: 'Error al consultar pago' });
+    }
+});
+
+app.post('/api/seed', async (req, res) => {
+    try {
+        let bank = await Bank.findOne();
+        if (!bank) {
+            bank = new Bank({ balance: 10000 });
+            await bank.save();
+        }
+
+        let user = await User.findOne({ email: 'cliente@demo.com' });
+        if (!user) {
+            user = new User({
+                userId: generateId(),
+                name: 'Cliente Demo',
+                email: 'cliente@demo.com',
+                balance: 100
+            });
+            await user.save();
+        }
+
+        let merchant = await Merchant.findOne({ email: 'comercio@demo.com' });
+        if (!merchant) {
+            merchant = new Merchant({
+                merchantId: generateId(),
+                name: 'Mi Tienda Demo',
+                email: 'comercio@demo.com',
+                balance: 0
+            });
+            await merchant.save();
+        }
+
+        res.json({
+            success: true,
+            bank,
+            user,
+            merchant
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error en seed' });
+    }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
-  console.log(`API disponible en http://localhost:${PORT}/api`);
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    console.log(`📡 API disponible en http://localhost:${PORT}/api`);
+    console.log(`🗄️  Conectado a MongoDB`);
+    console.log(`\n💡 Ejecuta POST /api/seed para crear datos de prueba`);
 });
 
 module.exports = app;
